@@ -638,6 +638,9 @@ impl ObjectInfoBlock {
         };
 
         state.prev_object_basic_info = info.object_basic_info.clone();
+        // Whatever the block ended up with is what the next object's `object_gain_idx` 3
+        // takes, an inactive object's -inf and a reused gain included.
+        state.prev_object_gain[block_index] = info.object_basic_info.object_gain;
 
         info.b_object_in_bed_or_isf = object_index < state.program_assignment.beds_or_isf_count();
 
@@ -723,7 +726,7 @@ impl ObjectBasicInfo {
             reader.get_n(2)?
         };
 
-        if obj_basic_info_bits & 1 != 0 {
+        if obj_basic_info_bits & 2 != 0 {
             let prev_object_gain = if object_index == 0 {
                 0
             } else {
@@ -746,11 +749,9 @@ impl ObjectBasicInfo {
                 3 => prev_object_gain,
                 _ => unreachable!(),
             };
-
-            state.prev_object_gain[block_index] = basic.object_gain;
         }
 
-        if obj_basic_info_bits & 2 != 0 {
+        if obj_basic_info_bits & 1 != 0 {
             // b_default_object_priority
             basic.object_priority = if reader.get()? {
                 1.0
@@ -890,7 +891,7 @@ impl ObjectRenderInfo {
 
             if render.b_object_use_screen_ref {
                 render.screen_factor = (reader.get_n::<u8>(3)? + 1) as f64 / 8.0;
-                render.depth_factor = 0.25 * (reader.get_n::<u8>(2)? + 1) as f64;
+                render.depth_factor = DEPTH_FACTORS[reader.get_n::<u8>(2)? as usize];
             } else {
                 render.screen_factor = 0.0
             }
@@ -903,6 +904,9 @@ impl ObjectRenderInfo {
 }
 
 pub const NUM_TRIM_CONFIGS: usize = 9;
+
+/// Maps a 2-bit depth_factor_idx to the exponent of the screen anchoring depth curve.
+pub const DEPTH_FACTORS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
 
 /// Maps a 4-bit distance_factor_idx to object distance in metres.
 #[rustfmt::skip]
@@ -2046,6 +2050,195 @@ mod tests {
         assert!(!element.b_present);
         assert!(element.object_dialog_indication.is_empty());
 
+        Ok(())
+    }
+
+    /// A payload of `object_count` dynamic objects with one block each, `objects` writing
+    /// every object's block in order.
+    fn object_blocks_payload(
+        object_count: u32,
+        block_count: u32,
+        objects: impl Fn(&mut Bits),
+    ) -> Vec<u8> {
+        let mut element = Bits::default();
+        element.push(2, 0); // sample_offset_code
+        element.push(3, block_count - 1); // num_obj_info_blocks - 1
+        for _ in 0..block_count {
+            element.push(6, 0); // block_offset_factor
+            element.push(2, 0); // ramp_duration_code
+        }
+        element.push(1, 1); // b_reserved_data_not_present
+        objects(&mut element);
+
+        let mut bits = Bits::default();
+        bits.push(2, 0); // oamd_version
+        bits.push(5, object_count - 1);
+        bits.push(1, 1); // b_dyn_object_only_program
+        bits.push(1, 0); // b_lfe_present
+        bits.push(1, 0); // b_alternate_object_data_present
+        bits.push(4, 1); // oa_element_count
+        bits.push(4, 1); // oa_element_id_idx: object
+        bits.push(4, ((element.len + 1).div_ceil(8) - 1) as u32);
+        bits.push(1, 0); // no further size group
+        bits.push(1, 0); // b_discard_unknown_element
+        for i in 0..element.len {
+            bits.push(1, ((element.data[i / 8] >> (7 - (i % 8))) & 1) as u32);
+        }
+        bits.data
+    }
+
+    /// The first block of an active room-anchored object: gain, default priority and a
+    /// centred position. `gain` writes `object_gain_idx` and what follows it, `screen` the
+    /// screen anchoring bits if any.
+    fn first_block(b: &mut Bits, gain: impl Fn(&mut Bits), screen: impl Fn(&mut Bits)) {
+        b.push(1, 0); // b_object_not_active
+        gain(b);
+        b.push(1, 1); // b_default_object_priority
+        b.push(6, 31); // pos_x
+        b.push(6, 31); // pos_y
+        b.push(1, 1); // pos_z sign
+        b.push(4, 0); // pos_z
+        b.push(1, 0); // b_object_distance_specified
+        b.push(4, 0); // zone constraints
+        b.push(2, 0); // object_size_idx
+        screen(b);
+        b.push(1, 0); // b_object_snap
+        b.push(1, 0); // b_additional_table_data_exists
+    }
+
+    fn gains(payload: &ObjectAudioMetadataPayload) -> Vec<i8> {
+        payload
+            .object_element
+            .as_ref()
+            .expect("an object element")
+            .object_data
+            .iter()
+            .map(|blocks| blocks[0].object_basic_info.object_gain)
+            .collect()
+    }
+
+    #[test]
+    fn object_gain_idx_3_takes_the_previous_objects_gain() -> Result<()> {
+        let data = object_blocks_payload(2, 1, |b| {
+            first_block(
+                b,
+                |b| {
+                    b.push(2, 2);
+                    b.push(6, 9);
+                },
+                |b| b.push(1, 0),
+            );
+            first_block(b, |b| b.push(2, 3), |b| b.push(1, 0));
+        });
+
+        assert_eq!(gains(&ObjectAudioMetadataPayload::read(&data)?), [6, 6]);
+        Ok(())
+    }
+
+    /// An inactive object's gain is -inf, and that is what a following `object_gain_idx` 3
+    /// takes, not the gain of the last object that did signal one.
+    #[test]
+    fn object_gain_idx_3_after_an_inactive_object_is_minus_infinity() -> Result<()> {
+        let data = object_blocks_payload(3, 1, |b| {
+            first_block(
+                b,
+                |b| {
+                    b.push(2, 2);
+                    b.push(6, 9);
+                },
+                |b| b.push(1, 0),
+            );
+            b.push(1, 1); // b_object_not_active, and nothing else for an inactive object
+            b.push(1, 0); // b_additional_table_data_exists
+            first_block(b, |b| b.push(2, 3), |b| b.push(1, 0));
+        });
+
+        assert_eq!(
+            gains(&ObjectAudioMetadataPayload::read(&data)?),
+            [6, GAIN_MINUS_INFINITY, GAIN_MINUS_INFINITY]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn depth_factor_follows_the_table() -> Result<()> {
+        for (idx, expected) in [0.25, 0.5, 1.0, 2.0].into_iter().enumerate() {
+            let data = object_blocks_payload(1, 1, |b| {
+                first_block(
+                    b,
+                    |b| b.push(2, 0),
+                    |b| {
+                        b.push(1, 1); // b_object_use_screen_ref
+                        b.push(3, 7); // screen_factor_idx
+                        b.push(2, idx as u32);
+                    },
+                );
+            });
+            let payload = ObjectAudioMetadataPayload::read(&data)?;
+            let render = &payload.object_element.unwrap().object_data[0][0].object_render_info;
+
+            assert!(render.b_object_use_screen_ref);
+            assert_eq!(render.screen_factor, 1.0);
+            assert_eq!(render.depth_factor, expected);
+        }
+        Ok(())
+    }
+
+    /// Bit 1 of the basic info mask is the gain and bit 0 the priority: a partial update
+    /// of the priority alone leaves the gain as the previous block had it.
+    #[test]
+    fn basic_info_mask_bit_1_is_the_gain_and_bit_0_the_priority() -> Result<()> {
+        let data = object_blocks_payload(1, 2, |b| {
+            first_block(
+                b,
+                |b| {
+                    b.push(2, 2);
+                    b.push(6, 9);
+                },
+                |b| b.push(1, 0),
+            );
+            b.push(1, 0); // b_object_not_active
+            b.push(2, 3); // object_basic_info_status_idx
+            b.push(2, 1); // obj_basic_info_bits: the priority
+            b.push(1, 0); // b_default_object_priority
+            b.push(5, 16); // object_priority_code
+            b.push(2, 0); // object_render_info_status_idx
+            b.push(1, 0); // b_additional_table_data_exists
+        });
+
+        let payload = ObjectAudioMetadataPayload::read(&data)?;
+        let blocks = &payload.object_element.unwrap().object_data[0];
+
+        assert_eq!(blocks[1].object_basic_info.object_gain, 6);
+        assert_eq!(blocks[1].object_basic_info.object_priority, 0.5);
+        Ok(())
+    }
+
+    /// The other half of the mask: the gain alone leaves the priority.
+    #[test]
+    fn basic_info_mask_gain_only_leaves_the_priority() -> Result<()> {
+        let data = object_blocks_payload(1, 2, |b| {
+            first_block(
+                b,
+                |b| {
+                    b.push(2, 2);
+                    b.push(6, 9);
+                },
+                |b| b.push(1, 0),
+            );
+            b.push(1, 0); // b_object_not_active
+            b.push(2, 3); // object_basic_info_status_idx
+            b.push(2, 2); // obj_basic_info_bits: the gain
+            b.push(2, 1); // object_gain_idx: -inf
+            b.push(2, 0); // object_render_info_status_idx
+            b.push(1, 0); // b_additional_table_data_exists
+        });
+
+        let payload = ObjectAudioMetadataPayload::read(&data)?;
+        let blocks = &payload.object_element.unwrap().object_data[0];
+
+        assert_eq!(blocks[1].object_basic_info.object_gain, GAIN_MINUS_INFINITY);
+        assert_eq!(blocks[1].object_basic_info.object_priority, 1.0);
         Ok(())
     }
 
