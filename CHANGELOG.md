@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A payload that codes the reserved `sample_offset_code` 3 is read as an error instead of panicking
+
 ## [0.1.0] - 2026-09-17
 
 ### Added
