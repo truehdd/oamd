@@ -547,8 +547,8 @@ impl MDUpdateInfo {
             },
             // sample_offset_bits
             2 => reader.get_n::<u8>(5)? as usize,
-            // 3 => // reserved
-            _ => unreachable!(),
+            // 3 is reserved, and a corrupt stream can code it
+            code => bail!("reserved sample_offset_code {code}"),
         };
 
         let num_obj_info_blocks = (reader.get_n::<u8>(3)? + 1) as usize;
@@ -2068,6 +2068,19 @@ mod tests {
         assert!(element.object_dialog_indication.is_empty());
 
         Ok(())
+    }
+
+    /// `sample_offset_code` 3 is reserved: a stream that codes it is an error, not a panic.
+    #[test]
+    fn reserved_sample_offset_code_is_an_error() {
+        let data = payload_with_element(1, |b| {
+            b.push(2, 3); // sample_offset_code
+            b.push(3, 0); // num_obj_info_blocks - 1
+        });
+
+        let error = ObjectAudioMetadataPayload::read(&data).expect_err("a reserved code");
+
+        assert!(error.to_string().contains("sample_offset_code 3"));
     }
 
     #[test]
