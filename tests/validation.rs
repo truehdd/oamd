@@ -159,3 +159,77 @@ fn repeated_objects_with_empty_extended_blocks_remain_supported() {
     let parsed = ObjectAudioMetadataPayload::read(&bytes).unwrap();
     assert_eq!(parsed.get_damf_pos()[0].len(), 1);
 }
+
+#[test]
+fn object_fields_cannot_cross_the_declared_element_boundary() {
+    let bytes = payload(&[(1, inactive_object(2), Some(1))]);
+    assert!(ObjectAudioMetadataPayload::read(&bytes).is_err());
+}
+
+#[test]
+fn headphone_fields_cannot_cross_the_declared_element_boundary() {
+    let mut body = Bits::default();
+    body.push(3, 3); // hp_mode: per object
+    body.push(3, 0); // one block
+    body.push(2, 1); // hp_render_mode
+    body.push(1, 0); // hp_head_track_disable
+    let bytes = payload(&[(3, body, Some(1))]);
+    assert!(ObjectAudioMetadataPayload::read(&bytes).is_err());
+}
+
+#[test]
+fn truncated_unknown_element_does_not_expose_its_tail_as_another_element() {
+    let mut headphone = Bits::default();
+    headphone.push(3, 0);
+    headphone.push(3, 0);
+    let bytes = payload(&[(0, Bits::default(), Some(16)), (3, headphone, None)]);
+    assert!(ObjectAudioMetadataPayload::read(&bytes).is_err());
+}
+
+#[test]
+fn truncated_bed_element_remains_discarded() {
+    let mut body = Bits::default();
+    body.push(1, 0); // is_channels: no further fields
+    let bytes = payload(&[(6, body, Some(16))]);
+    let parsed = ObjectAudioMetadataPayload::read(&bytes).unwrap();
+    assert!(parsed.bed_object_element.is_none());
+}
+
+#[test]
+fn unknown_padding_does_not_hide_the_following_element() {
+    let mut unknown = Bits::default();
+    unknown.push(20, 0xabcde);
+    let mut headphone = Bits::default();
+    headphone.push(3, 1);
+    headphone.push(3, 0);
+    headphone.push(1, 1);
+    let bytes = payload(&[(14, unknown, None), (3, headphone, None)]);
+    let parsed = ObjectAudioMetadataPayload::read(&bytes).unwrap();
+    assert_eq!(parsed.oa_element_md.len(), 2);
+    assert!(parsed.headphone_element.unwrap().headphone_data[0][0].hp_head_track_disable);
+}
+
+#[test]
+fn malformed_bed_element_does_not_consume_the_following_element() {
+    let mut bed = Bits::default();
+    bed.push(7, 0x7f);
+    let mut headphone = Bits::default();
+    headphone.push(3, 1);
+    headphone.push(3, 0);
+    headphone.push(1, 1);
+    let bytes = payload(&[(6, bed, None), (3, headphone, None)]);
+    let parsed = ObjectAudioMetadataPayload::read(&bytes).unwrap();
+    assert!(parsed.bed_object_element.is_none());
+    assert!(parsed.headphone_element.unwrap().headphone_data[0][0].hp_head_track_disable);
+}
+
+#[test]
+fn metadata_ending_exactly_at_the_element_boundary_is_valid() {
+    let mut headphone = Bits::default();
+    headphone.push(3, 1);
+    headphone.push(3, 0);
+    headphone.push(1, 0);
+    let bytes = payload(&[(3, headphone, None)]);
+    let parsed = ObjectAudioMetadataPayload::read(&bytes).unwrap();
+    assert!(!parsed.headphone_element.unwrap().headphone_data[0][0].hp_head_track_disable);
+}

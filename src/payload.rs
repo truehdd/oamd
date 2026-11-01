@@ -398,13 +398,14 @@ impl OAElementMD {
         let oa_element_size = (oa_element_size_bits + 1) << 3;
 
         let pos_start = reader.position()?;
-        let pos_end = if oa_element_size > reader.available()? {
-            // Does this happen?
+        let truncated = oa_element_size > reader.available()?;
+        let pos_end = if truncated {
             warn!("Truncated oa_element_md with id {}", md.oa_element_id_idx);
-            reader.available()?
+            pos_start + reader.available()?
         } else {
             pos_start + oa_element_size
         };
+        let payload_end = reader.replace_limit(pos_end);
 
         if state.b_alternate_object_data_present {
             md.alternate_object_data_id_idx = Some(reader.get_n::<u8>(4)?);
@@ -429,7 +430,9 @@ impl OAElementMD {
                 state.headphone_element = Some(HeadphoneElement::read(state, reader)?);
             }
             OAElementType::BedObject => {
-                if state.bed_object_element.is_some() {
+                if truncated {
+                    warn!("Skipping truncated bed object element");
+                } else if state.bed_object_element.is_some() {
                     warn!("Duplicate bed object element, keeping the first");
                 } else {
                     match BedObjectElement::read(&state.program_assignment, reader, pos_end) {
@@ -455,6 +458,7 @@ impl OAElementMD {
         if pos_end > pos_current {
             reader.skip_n((pos_end - pos_current) as u32)?;
         }
+        reader.replace_limit(payload_end);
 
         trace!(
             "OAMD Element ID: {}, size: {}, start: {}, expected_end: {}, actual_end: {}",

@@ -24,7 +24,7 @@ impl<'a> SliceReader<'a> {
 
     #[inline(always)]
     pub(crate) fn get(&mut self) -> io::Result<bool> {
-        self.bits.read_bit()
+        self.bounded(1, "get", |bits| bits.read_bit())
     }
 
     #[inline(always)]
@@ -56,6 +56,11 @@ impl<'a> SliceReader<'a> {
         Ok(value)
     }
 
+    /// Sets an absolute bit limit and returns the previous one.
+    pub(crate) fn replace_limit(&mut self, end: u64) -> u64 {
+        std::mem::replace(&mut self.len, end)
+    }
+
     #[inline(always)]
     pub(crate) fn available(&mut self) -> io::Result<u64> {
         self.bits.position_in_bits().map(|pos| self.len - pos)
@@ -67,10 +72,6 @@ impl<'a> SliceReader<'a> {
     }
 
     pub(crate) fn skip_n(&mut self, n: u32) -> io::Result<()> {
-        // bitstream-io reports EOF itself for a short skip, so only a long one is worth checking
-        if n <= 64 {
-            return self.bits.skip(n);
-        }
         match self.available()? {
             available if n as u64 > available => Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -88,7 +89,7 @@ impl<'a> SliceReader<'a> {
         what: &str,
         read: impl FnOnce(&mut BitReader<io::Cursor<&'a [u8]>, BigEndian>) -> io::Result<T>,
     ) -> io::Result<T> {
-        if n > 32 && n as u64 > self.available()? {
+        if n as u64 > self.available()? {
             return Err(self.out_of_bounds(n, what));
         }
         match read(&mut self.bits) {
@@ -105,5 +106,51 @@ impl<'a> SliceReader<'a> {
                 self.bits.position_in_bits().unwrap_or(0)
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SliceReader;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn unaligned_limits_reject_reads_without_consuming_the_next_field() {
+        let mut reader = SliceReader::new(&[0xff, 0xff]);
+        reader.skip_n(3).unwrap();
+        let end = reader.replace_limit(5);
+        assert_eq!(end, 16);
+        assert_eq!(
+            reader.get_n::<u8>(3).unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            reader.get_s::<i8>(3).unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
+        assert_eq!(
+            reader.skip_n(3).unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
+        assert_eq!(reader.position().unwrap(), 3);
+        assert_eq!(reader.get_n::<u8>(2).unwrap(), 3);
+        assert_eq!(reader.get().unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(reader.position().unwrap(), 5);
+        assert_eq!(reader.available().unwrap(), 0);
+        reader.replace_limit(end);
+        assert_eq!(reader.get_n::<u16>(11).unwrap(), 0x7ff);
+    }
+
+    #[test]
+    fn skip_limits_cover_short_and_long_skips() {
+        for width in [1, 2, 31, 32, 33, 63, 64, 65] {
+            let mut reader = SliceReader::new(&[0xff; 16]);
+            reader.replace_limit(width - 1);
+            assert_eq!(
+                reader.skip_n(width as u32).unwrap_err().kind(),
+                ErrorKind::UnexpectedEof
+            );
+            assert_eq!(reader.position().unwrap(), 0);
+        }
     }
 }
