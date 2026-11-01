@@ -279,6 +279,21 @@ impl ObjectAudioMetadataPayload {
             .map(|_| OAElementMD::read(state, reader))
             .collect::<Result<Vec<_>>>()?;
 
+        if let (Some(object), Some(extended)) =
+            (&state.object_element, &state.extended_object_element)
+        {
+            let blocks = object.md_update_info.num_obj_info_blocks;
+            ensure!(
+                extended
+                    .object_div_block
+                    .iter()
+                    .map(Vec::len)
+                    .chain(extended.ext_prec_pos_block.iter().map(Vec::len))
+                    .all(|len| len == blocks),
+                "extended metadata block counts do not match the object metadata"
+            );
+        }
+
         let payload = Self {
             evo_sample_offset: 0,
             oamd_version,
