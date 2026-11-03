@@ -17,3 +17,7 @@ downmix gains retain codes, while object gain, priority, and ramp duration are c
 the parser. Consult the individual fields before interpreting them.
 
 Requires Rust 1.88 or later.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
