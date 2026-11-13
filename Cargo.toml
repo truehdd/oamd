@@ -1,6 +1,6 @@
 [package]
 name = "oamd"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Parser for versioned Dolby Object Audio Metadata payloads"
@@ -14,4 +14,4 @@ categories = ["multimedia::audio", "parser-implementations"]
 [dependencies]
 anyhow = "1.0.104"
 bitstream-io = "4.10.0"
-log = "0.4.33"
+log = "0.4.35"
